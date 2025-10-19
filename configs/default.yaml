@@ -1,0 +1,34 @@
+# Default training/evaluation configuration
+# Adjust paths and hyperparameters as needed
+
+paths:
+  data_dir: ./data
+  train_dir: ./data/train
+  valid_dir: ./data/valid
+  test_dir: ./data/test
+  checkpoints_dir: ./checkpoints
+  outputs_dir: ./outputs
+
+training:
+  model_name: caformer_s18.sail_in1k
+  img_size: 224
+  batch_size: 32
+  num_workers: 4
+  stage1_epochs: 5
+  stage1_lr: 0.002
+  stage1_wd: 0.01
+  stage2_epochs: 15
+  stage2_lr: 0.0002
+  stage2_wd: 0.05
+  stage3_epochs: 5
+  stage3_lr: 0.00001
+  stage3_wd: 0.05
+
+patience:
+  early_stopping: 6
+  reduce_lr_patience: 2
+  reduce_lr_factor: 0.5
+  min_lr: 0.000001
+  stage1_plateau: 2
+  stage2_plateau: 3
+  stage3_plateau: 5

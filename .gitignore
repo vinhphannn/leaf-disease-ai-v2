@@ -1,0 +1,43 @@
+# Checkpoint files (too large for GitHub)
+checkpoint/
+*.pth
+*.pt
+
+# Model files (will be tracked via Git LFS)
+
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.venv
+env/
+venv/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Output directories (optional - remove if you want to keep outputs)
+outputs/
