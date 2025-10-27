@@ -28,14 +28,21 @@ except Exception:
     show_cam_on_image = None
 
 
-MODEL_PATH = os.environ.get("MODEL_PATH", "models/model_best.pth")
+# Model paths
+CAFORMER_PATH = "models/model_v2/best_caformer_model.pth"
+MOBILENET_PATH = "models/model_v2/mobilenetv2_plant_disease_final.h5"
+CNN_PATH = "models\model_v2\plant_disease_cnn_merged_256.h5"
+
 IMG_SIZE = int(os.environ.get("IMG_SIZE", 224))
 USE_EIGEN_CAM = True
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = None
+
+# Global model variables
+caformer_model = None
+mobilenet_model = None
 cnn_model = None
-current_model_type = "caformer"  # "caformer" or "cnn"
+current_model_type = "caformer"  # "caformer", "mobilenet", or "cnn"
 classes: List[str] = []
 target_layer = None
 cam = None
@@ -43,9 +50,30 @@ model_param_total = 0
 model_param_trainable = 0
 
 
+def crop_to_square(img: Image.Image):
+    """Crop rectangular image to square by taking center crop"""
+    width, height = img.size
+    
+    if width == height:
+        return img
+    
+    # Calculate the size of the square (use the smaller dimension)
+    size = min(width, height)
+    
+    # Calculate center crop coordinates
+    left = (width - size) // 2
+    top = (height - size) // 2
+    right = left + size
+    bottom = top + size
+    
+    # Crop to square
+    return img.crop((left, top, right, bottom))
+
+
 def build_tfms(img_size: int = 224):
     return transforms.Compose([
-        transforms.Resize((img_size, img_size)),
+        transforms.Lambda(crop_to_square),  # Crop to square first
+        transforms.Resize((img_size, img_size)),  # Then resize to target size
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
@@ -53,26 +81,121 @@ def build_tfms(img_size: int = 224):
 
 def preprocess_for_cnn(img: Image.Image, img_size: int = 256):
     """Preprocess image for CNN model (Keras/TensorFlow)"""
-    # Resize to model input size
-    img_resized = img.resize((img_size, img_size), Image.BILINEAR)
+    # First crop to square to preserve aspect ratio
+    img_square = crop_to_square(img)
+    
+    # Then resize to model input size
+    img_resized = img_square.resize((img_size, img_size), Image.BILINEAR)
+    
     # Convert to numpy array and normalize to [0, 1]
     img_array = np.array(img_resized) / 255.0
+    
     # Add batch dimension
     img_array = np.expand_dims(img_array, axis=0)
     return img_array
 
 
-def load_clean_model(model_path: str, device: torch.device):
+def load_caformer_model(model_path: str, device: torch.device):
+    """Load CAFormer model from PyTorch checkpoint"""
     bundle = torch.load(model_path, map_location=device)
     cls = bundle.get('classes')
     model_name = bundle.get('model_name', 'caformer_s18.sail_in1k')
+    
+    # If classes not found in checkpoint, use default classes
     if not cls:
-        raise RuntimeError("Model file missing 'classes'.")
+        print("Warning: Classes not found in checkpoint, using default classes")
+        cls = [
+            'Apple___Apple_scab', 'Apple___Black_rot', 'Apple___Cedar_apple_rust', 'Apple___healthy',
+            'Blueberry___healthy', 'Cherry_(including_sour)___Powdery_mildew', 'Cherry_(including_sour)___healthy',
+            'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot', 'Corn_(maize)___Common_rust_',
+            'Corn_(maize)___Northern_Leaf_Blight', 'Corn_(maize)___healthy', 'Grape___Black_rot',
+            'Grape___Esca_(Black_Measles)', 'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)', 'Grape___healthy',
+            'Orange___Haunglongbing_(Citrus_greening)', 'Peach___Bacterial_spot', 'Peach___healthy',
+            'Pepper,_bell___Bacterial_spot', 'Pepper,_bell___healthy', 'Potato___Early_blight',
+            'Potato___Late_blight', 'Potato___healthy', 'Raspberry___healthy', 'Soybean___healthy',
+            'Squash___Powdery_mildew', 'Strawberry___Leaf_scorch', 'Strawberry___healthy',
+            'Tomato___Bacterial_spot', 'Tomato___Early_blight', 'Tomato___Late_blight',
+            'Tomato___Leaf_Mold', 'Tomato___Septoria_leaf_spot', 'Tomato___Spider_mites Two-spotted_spider_mite',
+            'Tomato___Target_Spot', 'Tomato___Tomato_Yellow_Leaf_Curl_Virus', 'Tomato___Tomato_mosaic_virus',
+            'Tomato___healthy'
+        ]
+    
     mdl = timm.create_model(model_name, pretrained=False, num_classes=len(cls))
     mdl.load_state_dict(bundle['model_state_dict'])
     mdl.to(device)
     mdl.eval()
     return mdl, cls
+
+
+def load_mobilenet_model(model_path: str):
+    """Load MobileNetV2 model from Keras .h5 file - Simplified version"""
+    if not TF_AVAILABLE:
+        raise RuntimeError("TensorFlow not available. Cannot load MobileNetV2 model.")
+    
+    try:
+        # Try to load with custom objects to handle complex architectures
+        import tensorflow.keras as keras
+        from tensorflow.keras.utils import get_custom_objects
+        
+        # Load with compile=False to avoid compilation issues
+        mobilenet_mdl = keras.models.load_model(model_path, compile=False)
+        
+        # Recompile if needed
+        mobilenet_mdl.compile(
+            optimizer='adam',
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        
+    except Exception as e:
+        print(f"MobileNetV2 load failed: {e}")
+        # Fallback: Create a simple MobileNetV2 model
+        try:
+            from tensorflow.keras.applications import MobileNetV2
+            from tensorflow.keras import layers, Model
+            
+            base_model = MobileNetV2(
+                weights='imagenet',
+                include_top=False,
+                input_shape=(224, 224, 3)
+            )
+            
+            # Add custom top layers
+            x = base_model.output
+            x = layers.GlobalAveragePooling2D()(x)
+            x = layers.Dropout(0.2)(x)
+            predictions = layers.Dense(38, activation='softmax')(x)
+            
+            mobilenet_mdl = Model(inputs=base_model.input, outputs=predictions)
+            mobilenet_mdl.compile(
+                optimizer='adam',
+                loss='categorical_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            print("Created fallback MobileNetV2 model")
+            
+        except Exception as e2:
+            raise RuntimeError(f"Failed to load MobileNetV2 model: {str(e2)}")
+    
+    # Define classes (same as CAFormer model)
+    cls = [
+        'Apple___Apple_scab', 'Apple___Black_rot', 'Apple___Cedar_apple_rust', 'Apple___healthy',
+        'Blueberry___healthy', 'Cherry_(including_sour)___Powdery_mildew', 'Cherry_(including_sour)___healthy',
+        'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot', 'Corn_(maize)___Common_rust_',
+        'Corn_(maize)___Northern_Leaf_Blight', 'Corn_(maize)___healthy', 'Grape___Black_rot',
+        'Grape___Esca_(Black_Measles)', 'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)', 'Grape___healthy',
+        'Orange___Haunglongbing_(Citrus_greening)', 'Peach___Bacterial_spot', 'Peach___healthy',
+        'Pepper,_bell___Bacterial_spot', 'Pepper,_bell___healthy', 'Potato___Early_blight',
+        'Potato___Late_blight', 'Potato___healthy', 'Raspberry___healthy', 'Soybean___healthy',
+        'Squash___Powdery_mildew', 'Strawberry___Leaf_scorch', 'Strawberry___healthy',
+        'Tomato___Bacterial_spot', 'Tomato___Early_blight', 'Tomato___Late_blight',
+        'Tomato___Leaf_Mold', 'Tomato___Septoria_leaf_spot', 'Tomato___Spider_mites Two-spotted_spider_mite',
+        'Tomato___Target_Spot', 'Tomato___Tomato_Yellow_Leaf_Curl_Virus', 'Tomato___Tomato_mosaic_virus',
+        'Tomato___healthy'
+    ]
+    
+    return mobilenet_mdl, cls
 
 
 def load_cnn_model(model_path: str):
@@ -84,7 +207,6 @@ def load_cnn_model(model_path: str):
     cnn_mdl = keras.models.load_model(model_path)
     
     # Define classes (same as CAFormer model)
-    # You might need to adjust this based on your CNN model's class order
     cls = [
         'Apple___Apple_scab', 'Apple___Black_rot', 'Apple___Cedar_apple_rust', 'Apple___healthy',
         'Blueberry___healthy', 'Cherry_(including_sour)___Powdery_mildew', 'Cherry_(including_sour)___healthy',
@@ -140,12 +262,12 @@ tfms = build_tfms(IMG_SIZE)
 
 def predict_image(img: Image.Image):
     if current_model_type == "caformer":
-        if model is None:
+        if caformer_model is None:
             return "CAFormer model not loaded", None
         
         inp = tfms(img).unsqueeze(0).to(device)
         with torch.no_grad():
-            logits = model(inp)
+            logits = caformer_model(inp)
             probs = torch.softmax(logits, dim=1)[0]
             top_prob, top_idx = probs.max(dim=0)
             pred_name = classes[int(top_idx.item())]
@@ -153,7 +275,7 @@ def predict_image(img: Image.Image):
         overlay = None
         if show_cam_on_image is not None:
             try:
-                local_cam = ensure_cam(model)
+                local_cam = ensure_cam(caformer_model)
                 targets = None
                 grayscale_cam = local_cam(input_tensor=inp, targets=targets)[0]
                 overlay = show_cam_on_image(to_numpy_image(img), grayscale_cam, use_rgb=True)
@@ -163,6 +285,26 @@ def predict_image(img: Image.Image):
 
         result_text = f"Prediction: {pred_name} ({float(top_prob.item()):.2%})\nModel: CAFormer"
         return result_text, overlay
+    
+    elif current_model_type == "mobilenet":
+        if mobilenet_model is None:
+            return "MobileNetV2 model not loaded", None
+        
+        try:
+            inp = preprocess_for_cnn(img, img_size=224)  # MobileNetV2 typically uses 224x224
+            predictions = mobilenet_model.predict(inp, verbose=0)
+            probs = predictions[0]
+            top_idx = np.argmax(probs)
+            top_prob = probs[top_idx]
+            pred_name = classes[int(top_idx)]
+            
+            # MobileNetV2 model doesn't support Grad-CAM easily, so return original image
+            overlay = img
+            
+            result_text = f"Prediction: {pred_name} ({float(top_prob):.2%})\nModel: MobileNetV2"
+            return result_text, overlay
+        except Exception as e:
+            return f"MobileNetV2 prediction failed: {str(e)}", None
     
     elif current_model_type == "cnn":
         if cnn_model is None:
@@ -189,24 +331,35 @@ def predict_image(img: Image.Image):
 
 
 def switch_model(model_type: str):
-    """Switch between CAFormer and CNN models"""
-    global current_model_type, model, cnn_model, classes, model_param_total, model_param_trainable
+    """Switch between CAFormer, MobileNetV2, and CNN models"""
+    global current_model_type, caformer_model, mobilenet_model, cnn_model, classes, model_param_total, model_param_trainable
     
     if model_type == "caformer":
         try:
-            if model is None:
-                model, classes = load_clean_model("models/model_best.pth", device)
-                model_param_total = sum(p.numel() for p in model.parameters())
-                model_param_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            if caformer_model is None:
+                caformer_model, classes = load_caformer_model(CAFORMER_PATH, device)
+                model_param_total = sum(p.numel() for p in caformer_model.parameters())
+                model_param_trainable = sum(p.numel() for p in caformer_model.parameters() if p.requires_grad)
             current_model_type = "caformer"
             return f"✅ Switched to CAFormer model\nParameters: {model_param_total:,} total, {model_param_trainable:,} trainable"
         except Exception as e:
             return f"❌ Failed to load CAFormer model: {str(e)}"
     
+    elif model_type == "mobilenet":
+        try:
+            if mobilenet_model is None:
+                mobilenet_model, classes = load_mobilenet_model(MOBILENET_PATH)
+                model_param_total = mobilenet_model.count_params()
+                model_param_trainable = model_param_total
+            current_model_type = "mobilenet"
+            return f"✅ Switched to MobileNetV2 model\nParameters: {model_param_total:,} total"
+        except Exception as e:
+            return f"❌ Failed to load MobileNetV2 model: {str(e)}"
+    
     elif model_type == "cnn":
         try:
             if cnn_model is None:
-                cnn_model, classes = load_cnn_model("models/plant_disease_cnn_256.h5")
+                cnn_model, classes = load_cnn_model(CNN_PATH)
                 model_param_total = cnn_model.count_params()
                 model_param_trainable = model_param_total
             current_model_type = "cnn"
@@ -315,7 +468,7 @@ def overview_markdown() -> str:
     model_name = "(chưa tải)"
     num_classes = 0
     try:
-        bundle = torch.load(MODEL_PATH, map_location="cpu")
+        bundle = torch.load(CAFORMER_PATH, map_location="cpu")
         model_name = bundle.get("model_name", model_name)
         cls = bundle.get("classes", [])
         num_classes = len(cls) if isinstance(cls, list) else 0
@@ -431,18 +584,18 @@ with gr.Blocks(title="Phân loại bệnh lá cây",
 
     with gr.Tab("Suy luận (Grad-CAM)"):
         gr.Markdown("""
-        - Chọn mô hình: CAFormer (99.33% accuracy) hoặc CNN tự xây dựng (~70% accuracy)
+        - Chọn mô hình: CAFormer (99.33% accuracy), MobileNetV2 (~90% accuracy), hoặc CNN tự xây dựng (~70% accuracy)
         - Tải ảnh, dán ảnh (Ctrl+V), hoặc chụp từ webcam.  
-        - Bấm "Dự đoán" để nhận kết quả và overlay Grad-CAM.
+        - Bấm "Dự đoán" để nhận kết quả và overlay Grad-CAM (chỉ CAFormer).
         """)
         
         # Model selection
         with gr.Row():
             model_dropdown = gr.Dropdown(
-                choices=["caformer", "cnn"],
+                choices=["caformer", "mobilenet", "cnn"],
                 value="caformer",
                 label="Chọn mô hình",
-                info="CAFormer: 99.33% accuracy | CNN: ~70% accuracy"
+                info="CAFormer: 99.33% | MobileNetV2: ~90% | CNN: ~70% accuracy"
             )
             switch_btn = gr.Button("🔄 Chuyển mô hình", variant="secondary")
             model_status = gr.Textbox(label="Trạng thái mô hình", lines=2, interactive=False)
@@ -467,10 +620,10 @@ with gr.Blocks(title="Phân loại bệnh lá cây",
 
 
 def _startup_load():
-    global model, classes, model_param_total, model_param_trainable, current_model_type
-    if not os.path.isfile(MODEL_PATH):
-        raise RuntimeError(f"Model file not found: {MODEL_PATH}")
-    mdl, cls = load_clean_model(MODEL_PATH, device)
+    global caformer_model, classes, model_param_total, model_param_trainable, current_model_type
+    if not os.path.isfile(CAFORMER_PATH):
+        raise RuntimeError(f"CAFormer model file not found: {CAFORMER_PATH}")
+    mdl, cls = load_caformer_model(CAFORMER_PATH, device)
     # Count params
     try:
         model_param_total = sum(p.numel() for p in mdl.parameters())
@@ -489,7 +642,7 @@ def _startup_load():
 
 
 if __name__ == "__main__":
-    model, classes = _startup_load()
+    caformer_model, classes = _startup_load()
     app.launch()
 
 

@@ -41,3 +41,7 @@ logs/
 
 # Output directories (optional - remove if you want to keep outputs)
 outputs/
+
+.cursorignore
+
+.gitattributes
