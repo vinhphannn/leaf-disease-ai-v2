@@ -1,6 +1,5 @@
 # Checkpoint files (too large for GitHub)
 checkpoint/
-*.pth
 *.pt
 
 # Model files (will be tracked via Git LFS)
@@ -43,5 +42,4 @@ logs/
 outputs/
 
 .cursorignore
-
 .gitattributes
