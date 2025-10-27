@@ -1,4 +1,0 @@
-# Ignore dataset images to speed up indexing
-data/**/*.{jpg,JPG,jpeg,JPEG,png,PNG,webp}
-
-
