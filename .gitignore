@@ -1,7 +1,7 @@
 # Checkpoint files (too large for GitHub)
 checkpoint/
 *.pt
-
+*.pth
 # Model files (will be tracked via Git LFS)
 
 
